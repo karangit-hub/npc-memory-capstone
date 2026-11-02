@@ -85,18 +85,84 @@ def get_recent_messages(
         raise ValueError("limit must be non-negative")
 
     with closing(sqlite3.connect(db_path)) as connection:
-        rows = connection.execute(
-            """
-            SELECT role, content
-            FROM messages
-            WHERE player_id = ? AND npc_id = ?
-            ORDER BY id DESC
-            LIMIT ?
-            """,
-            (player_id, npc_id, limit),
-        ).fetchall()
+        return _get_recent_messages(connection, player_id, npc_id, limit)
+
+
+def _get_recent_messages(
+    connection: sqlite3.Connection, player_id: str, npc_id: str, limit: int
+) -> list[dict[str, str]]:
+    rows = connection.execute(
+        """
+        SELECT role, content FROM messages
+        WHERE player_id = ? AND npc_id = ?
+        ORDER BY id DESC LIMIT ?
+        """,
+        (player_id, npc_id, limit),
+    ).fetchall()
 
     return [{"role": role, "content": content} for role, content in reversed(rows)]
+
+
+def get_chat_context(
+    player_id: str,
+    npc_id: str,
+    query: str,
+    db_path: str | Path = DEFAULT_DB_PATH,
+) -> tuple[list[dict[str, str]], list[dict[str, str | int]]]:
+    """Read both context blocks from one snapshot, closing it before generation."""
+    with closing(sqlite3.connect(db_path)) as connection, connection:
+        # Explicit BEGIN is needed: Python's legacy sqlite mode does not begin
+        # a transaction for SELECT alone. The first SELECT fixes the snapshot.
+        connection.execute("BEGIN")
+        history = _get_recent_messages(
+            connection, player_id, npc_id, RECENT_MESSAGE_LIMIT
+        )
+        memories = _get_relevant_memories(
+            connection, player_id, npc_id, query,
+            MAX_HISTORICAL_MESSAGES, MAX_MEMORY_CHARS,
+        )
+    return history, memories
+
+
+def _memory_excerpt(content: str, keywords: set[str], budget: int) -> str:
+    """Keep the best matching sentence and nearby context, verbatim and bounded."""
+    if len(content) <= budget:
+        return content
+
+    # Basic sentence boundaries, not a language parser. Later sentences win
+    # equal-overlap ties so an early topic mention cannot always dominate.
+    sentences = list(re.finditer(r"[^.!?\n]+(?:[.!?]+|\n|$)", content))
+    sentence = max(
+        sentences,
+        key=lambda part: (len(keywords & _keywords(part.group())), part.start()),
+    )
+    start, end = sentence.span()
+    if end - start <= budget:
+        index = sentences.index(sentence)
+        if (index > 0
+                and keywords & _keywords(sentences[index - 1].group())
+                and end - sentences[index - 1].start() <= budget):
+            start = sentences[index - 1].start()
+        if (index + 1 < len(sentences)
+                and keywords & _keywords(sentences[index + 1].group())
+                and sentences[index + 1].end() - start <= budget):
+            end = sentences[index + 1].end()
+        return content[start:end].strip()
+
+    # A sentence itself may exceed the cap. Compare short windows around every
+    # matching token, rather than blindly keeping its first topic mention.
+    starts = {
+        max(start, min(part.start() - budget // 4, end - budget))
+        for part in WORD_PATTERN.finditer(content, start, end)
+        if part.group().casefold() in keywords
+    }
+    window_start = max(
+        starts,
+        key=lambda offset: (
+            len(keywords & _keywords(content[offset:offset + budget])), offset
+        ),
+    )
+    return content[window_start:window_start + budget]
 
 
 def get_relevant_memories(
@@ -116,47 +182,54 @@ def get_relevant_memories(
     """
     if limit < 0 or max_chars < 0:
         raise ValueError("limit and max_chars must be non-negative")
+    with closing(sqlite3.connect(db_path)) as connection:
+        return _get_relevant_memories(
+            connection, player_id, npc_id, query, limit, max_chars
+        )
+
+
+def _get_relevant_memories(
+    connection: sqlite3.Connection,
+    player_id: str,
+    npc_id: str,
+    query: str,
+    limit: int,
+    max_chars: int,
+) -> list[dict[str, str | int]]:
     keywords = _keywords(query)
     limit = min(limit, MAX_HISTORICAL_MESSAGES)
     remaining = min(max_chars, MAX_MEMORY_CHARS)
     if not keywords or not limit or not remaining:
         return []
 
-    with closing(sqlite3.connect(db_path)) as connection:
-        rows = connection.execute(
-            """
-            SELECT id, content FROM messages
-            WHERE player_id = ? AND npc_id = ? AND role = 'user'
-              AND id NOT IN (
-                  SELECT id FROM messages
-                  WHERE player_id = ? AND npc_id = ?
-                  ORDER BY id DESC LIMIT ?
-              )
-            """,
-            (player_id, npc_id, player_id, npc_id, RECENT_MESSAGE_LIMIT),
-        )
-        # Stream the archive and retain only the best three candidates in memory.
-        ranked = nlargest(
-            limit,
-            (
-                (score, message_id, content)
-                for message_id, content in rows
-                if (score := len(keywords & _keywords(content))) > 0
-            ),
-        )
+    rows = connection.execute(
+        """
+        SELECT id, content FROM messages
+        WHERE player_id = ? AND npc_id = ? AND role = 'user'
+          AND id NOT IN (
+              SELECT id FROM messages
+              WHERE player_id = ? AND npc_id = ?
+              ORDER BY id DESC LIMIT ?
+          )
+        """,
+        (player_id, npc_id, player_id, npc_id, RECENT_MESSAGE_LIMIT),
+    )
+    # Stream the archive and retain only the best three candidates in memory.
+    ranked = nlargest(
+        limit,
+        (
+            (score, message_id, content)
+            for message_id, content in rows
+            if (score := len(keywords & _keywords(content))) > 0
+        ),
+    )
 
     memories = []
-    for score, message_id, content in ranked:
+    for _score, message_id, content in ranked:
         if not remaining:
             break
         budget = min(MAX_EXCERPT_CHARS, remaining)
-        # Keep the first matching word visible even in a long historical message.
-        match = next(
-            match for match in WORD_PATTERN.finditer(content)
-            if match.group().casefold() in keywords
-        )
-        start = max(0, match.start() - budget // 4)
-        excerpt = content[start:start + budget]
+        excerpt = _memory_excerpt(content, keywords, budget)
         memories.append({"message_id": message_id, "content": excerpt})
         remaining -= len(excerpt)
     return memories

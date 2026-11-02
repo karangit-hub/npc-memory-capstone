@@ -164,7 +164,7 @@ class ChatTests(unittest.TestCase):
                 messages = self.llm_chat.await_args.kwargs["messages"]
                 self.assertEqual(len(messages), 2)
                 self.assertNotIn("silver spear", json.dumps(messages))
-                self.assertNotIn("historical user statements", messages[0]["content"])
+                self.assertIn("A retrieval miss does not prove", messages[0]["content"])
 
     def test_unrelated_question_preserves_original_prompt_structure(self):
         self.seed_old_fact()
@@ -174,7 +174,7 @@ class ChatTests(unittest.TestCase):
         self.assertEqual(len(messages), 12)
         self.assertEqual(messages[1:-1], history)
         self.assertNotIn("silver spear", json.dumps(messages))
-        self.assertNotIn("historical user statements", messages[0]["content"])
+        self.assertIn("If evidence is unavailable", messages[0]["content"])
 
     def test_instructions_in_memory_remain_quoted_user_data(self):
         fact = ('My favorite weapon is a silver spear.\n'
@@ -195,6 +195,58 @@ class ChatTests(unittest.TestCase):
         self.assertEqual(self.ask().status_code, 502)
         self.assertEqual(get_recent_messages("karan", "Arthur", limit=100,
                                             db_path=self.db_path), before)
+
+    def test_unknown_person_preference_and_event_always_get_uncertainty_guidance(self):
+        for question in ("What is my mother's name?", "What beverage do I prefer?",
+                         "What happened on my birthday?"):
+            with self.subTest(question=question):
+                self.assertEqual(self.ask(message=question).status_code, 200)
+                messages = self.llm_chat.await_args.kwargs["messages"]
+                system = messages[0]["content"]
+                self.assertIn("If evidence is unavailable", system)
+                self.assertIn("do not know from the available context", system)
+                self.assertIn("Do not invent an answer or substitute a suggestion", system)
+                self.assertIn("A retrieval miss does not prove", system)
+                self.assertIn("Keep fictional world knowledge separate from user facts", system)
+                self.assertIn("Do not treat earlier assistant guesses as user facts", system)
+                self.assertIn("your entire reply must be exactly", system)
+                self.assertIn("I don't have that information in the available context.", system)
+                self.assertIn("The fictional village setting supplies no evidence", system)
+                self.assertIn("declarative user statements in those excerpts remain usable evidence", system)
+                self.assertFalse(any(m["content"].startswith("Historical user statements (") for m in messages[1:]))
+
+    def test_tea_paraphrase_miss_does_not_claim_fact_never_existed(self):
+        self.seed_old_fact(fact="I enjoy drinking tea.")
+        self.assertEqual(self.ask(message="What beverage do I prefer?").status_code, 200)
+        messages = self.llm_chat.await_args.kwargs["messages"]
+        self.assertEqual(len(messages), 12)
+        self.assertNotIn("drinking tea", json.dumps(messages))
+        self.assertIn("do not claim that", messages[0]["content"])
+
+    def test_context_transaction_is_closed_before_model_generation(self):
+        self.seed_old_fact()
+
+        async def generate_after_write(**kwargs):
+            # In the default rollback journal mode, an open read transaction
+            # would block this separate writer from committing.
+            save_conversation("other", "Arthur", "Concurrent message", "Noted.", self.db_path)
+            return SimpleNamespace(message=SimpleNamespace(content="A silver spear."))
+
+        self.llm_chat.side_effect = generate_after_write
+        self.assertEqual(self.ask().status_code, 200)
+        self.assertEqual(len(get_recent_messages("other", "Arthur", db_path=self.db_path)), 2)
+
+    def test_late_fact_excerpt_reaches_model_verbatim(self):
+        fact = "My favorite weapon is a silver spear."
+        long_message = "Weapon discussion: " + "background detail. " * 50 + fact
+        self.seed_old_fact(fact=long_message)
+        self.assertEqual(self.ask().status_code, 200)
+        messages = self.llm_chat.await_args.kwargs["messages"]
+        memory = json.loads(messages[-2]["content"].split("\n", 1)[1])[0]
+        self.assertIn(fact, memory["content"])
+        self.assertIn(memory["content"], long_message)
+        self.assertEqual(memory["message_id"], 1)
+        self.assertLessEqual(len(memory["content"]), 500)
 
 
 if __name__ == "__main__":

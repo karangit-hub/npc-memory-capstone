@@ -1,10 +1,15 @@
 import sqlite3
 import tempfile
 import unittest
+from contextlib import closing
 from pathlib import Path
+from unittest.mock import patch
+
+import memory_store
 
 from memory_store import (
     get_recent_messages,
+    get_chat_context,
     get_relevant_memories,
     init_db,
     save_conversation,
@@ -208,6 +213,91 @@ class MemoryStoreTests(unittest.TestCase):
         for options in ({"limit": -1}, {"max_chars": -1}):
             with self.subTest(options=options), self.assertRaises(ValueError):
                 self.memories(**options)
+
+    def test_excerpt_prefers_late_relevant_sentence_over_early_topic(self):
+        fact = "My favorite weapon is a silver spear."
+        text = "Weapon discussion: " + "background detail. " * 50 + fact
+        self.save("player", "guard", text, "Noted.")
+        self.age_history()
+        memory = self.memories()[0]
+        self.assertEqual(memory["message_id"], 1)
+        self.assertIn(fact, memory["content"])
+        self.assertEqual(memory["content"], fact)
+        self.assertIn(memory["content"], text)
+        self.assertLessEqual(len(memory["content"]), 500)
+        self.assertEqual(self.memories()[0], memory)
+
+    def test_excerpt_uses_relevant_window_in_overlong_sentence(self):
+        fact = "my favorite weapon is a silver spear."
+        text = "Weapon discussion " + "background detail " * 100 + fact
+        self.save("player", "guard", text, "Noted.")
+        self.age_history()
+        excerpt = self.memories()[0]["content"]
+        self.assertIn(fact, excerpt)
+        self.assertIn(excerpt, text)
+        self.assertLessEqual(len(excerpt), 500)
+
+    def test_excerpt_preserves_complete_sentence_with_negation(self):
+        fact = "My favorite weapon is not a silver spear; it is a wooden staff."
+        self.save("player", "guard", "Background. " * 100 + fact, "Noted.")
+        self.age_history()
+        self.assertIn(fact, self.memories()[0]["content"])
+
+    def test_excerpt_handles_relevant_newline_without_sentence_punctuation(self):
+        fact = "My sister's name is Emily"
+        self.save("player", "guard", fact + "\n" + "Clouds. " * 100, "Noted.")
+        self.age_history()
+        self.assertIn(fact, self.memories("What is my sister's name?")[0]["content"])
+
+    def test_keyword_paraphrase_still_has_no_semantic_match(self):
+        self.save("player", "guard", "I enjoy drinking tea.", "Noted.")
+        self.age_history()
+        self.assertEqual(self.memories("What beverage do I prefer?"), [])
+
+    def test_context_snapshot_excludes_intervening_committed_writes(self):
+        # WAL allows a real second connection to commit while this reader holds
+        # its snapshot. Journal mode changes apply only to this temporary DB.
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            self.assertEqual(connection.execute("PRAGMA journal_mode=WAL").fetchone()[0], "wal")
+        fact = "My favorite weapon is a silver spear."
+        self.save("player", "guard", fact, "Noted.")
+        self.age_history(exchanges=4)
+        before = self.history()
+        read_recent = memory_store._get_recent_messages
+
+        def read_then_write(connection, player, npc, limit):
+            rows = read_recent(connection, player, npc, limit)
+            self.assertTrue(connection.in_transaction)
+            self.age_history(exchanges=6)
+            return rows
+
+        with patch.object(memory_store, "_get_recent_messages", side_effect=read_then_write):
+            recent, memories = get_chat_context(
+                "player", "guard", "What is my favorite weapon?", self.db_path
+            )
+        self.assertEqual(recent, before)
+        self.assertEqual(memories, [])
+        # A fresh read sees the committed newer exchanges and the now-old fact.
+        self.assertNotEqual(self.history(), before)
+        self.assertEqual(self.memories(), [{"message_id": 1, "content": fact}])
+
+    def test_combined_context_preserves_pair_isolation(self):
+        self.save("player", "guard", "My favorite weapon is a spear.", "Noted.")
+        self.age_history()
+        for player, npc in [("other", "guard"), ("player", "merchant"),
+                            ("Player", "guard"), ("player", "Guard")]:
+            with self.subTest(player=player, npc=npc):
+                self.assertEqual(get_chat_context(player, npc, "favorite weapon", self.db_path), ([], []))
+        recent, memories = get_chat_context("player", "guard", "favorite weapon", self.db_path)
+        self.assertEqual(recent, self.history())
+        self.assertEqual(memories, self.memories())
+
+    def test_context_read_failure_releases_transaction(self):
+        with patch.object(memory_store, "_get_relevant_memories", side_effect=RuntimeError("read failed")):
+            with self.assertRaisesRegex(RuntimeError, "read failed"):
+                get_chat_context("player", "guard", "weapon", self.db_path)
+        self.save("player", "guard", "A later message", "Noted.")
+        self.assertEqual(len(self.history()), 2)
 
 
 if __name__ == "__main__":
