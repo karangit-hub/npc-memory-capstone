@@ -101,7 +101,3 @@ The NPC currently being spoken to pauses while the panel is open, including whil
 - **Pink objects:** rebuild with the project's active render pipeline and check that the URP pipeline asset is assigned if using URP.
 - **`Can't Generate Mesh, No Font Asset has been assigned`:** the generated UI uses Unity UI `Text`, not TextMeshPro. A warning from `UnityEditor.HandleUtility.BeginHandles` while the village builds and UI text renders is an Editor-side text/handle warning, not an API failure.
 - **`URP Global Settings Asset has been created`:** informational Unity message; it does not require a change.
-
-## Keep these files in Git
-
-Commit the source scripts, generated `Village.unity`, `.mat` assets, and their `.meta` files. Unity uses `.meta` files to keep asset GUIDs and references stable across machines. Exclude generated folders such as `Library/`, `Temp/`, `Obj/`, `Logs/`, and build output.
