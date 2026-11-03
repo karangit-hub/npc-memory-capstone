@@ -204,14 +204,4 @@ To reuse Karan's earlier test, connect Unity to the same backend database and en
 
 The local Unity-to-FastAPI chat round trip has been completed successfully: a message sent in Unity received and displayed an NPC response from FastAPI. The backend's persistence and player-isolation tests are documented above. To verify a particular memory in Unity, use the same backend database, player ID, and NPC ID that contain that memory, then ask the NPC about it after reopening the conversation.
 
-### Troubleshooting and project notes
-
-- **404:** confirm the route is `/chat` and that Unity's `baseUrl` uses the port of the running backend.
-- **422:** compare `playerIdField`, `npcIdField`, and `messageField` with FastAPI `/docs`.
-- **Connection refused or timeout:** start FastAPI and Ollama; confirm Unity and the server use the same machine/address.
-- **The NPC answers “I don't know”:** check that the player ID, NPC ID, database, and summary-context mode match the memory test.
-- **Input errors:** set Active Input Handling to **Both** or **Input Manager (Old)**.
-- Unity UI uses standard Unity UI `Text`, not TextMeshPro. A `Can't Generate Mesh, No Font Asset has been assigned` warning from `UnityEditor.HandleUtility.BeginHandles` does not indicate a FastAPI failure when the scene builds and UI text displays. `URP Global Settings Asset has been created` is informational.
-
-Keep Unity source such as `Assets`, `Packages`, and `ProjectSettings` in GitHub; exclude generated `Library`, `Temp`, `Obj`, and build output folders. Preserve Unity `.meta` files so asset references remain stable.
 
