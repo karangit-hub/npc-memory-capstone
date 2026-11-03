@@ -109,19 +109,69 @@ def get_chat_context(
     query: str,
     db_path: str | Path = DEFAULT_DB_PATH,
 ) -> tuple[list[dict[str, str]], list[dict[str, str | int]]]:
-    """Read both context blocks from one snapshot, closing it before generation."""
+    """Phase 1 interface: read recent and keyword context from one snapshot."""
+    history, memories, _summary = get_chat_context_with_summary(
+        player_id, npc_id, query, db_path, include_summary=False
+    )
+    return history, memories
+
+
+def get_chat_context_with_summary(
+    player_id: str,
+    npc_id: str,
+    query: str,
+    db_path: str | Path = DEFAULT_DB_PATH,
+    *,
+    include_summary: bool = True,
+) -> tuple[list[dict[str, str]], list[dict[str, str | int]], dict | None]:
+    """Read all enabled memory blocks from one snapshot, then close it."""
     with closing(sqlite3.connect(db_path)) as connection, connection:
         # Explicit BEGIN is needed: Python's legacy sqlite mode does not begin
         # a transaction for SELECT alone. The first SELECT fixes the snapshot.
         connection.execute("BEGIN")
-        history = _get_recent_messages(
-            connection, player_id, npc_id, RECENT_MESSAGE_LIMIT
+        return _chat_context_snapshot(connection, player_id, npc_id, query, include_summary)
+
+
+def _chat_context_snapshot(connection, player_id, npc_id, query, include_summary):
+    summary = None
+    history = _get_recent_messages(connection, player_id, npc_id, RECENT_MESSAGE_LIMIT)
+    memories = _get_relevant_memories(
+        connection, player_id, npc_id, query, MAX_HISTORICAL_MESSAGES, MAX_MEMORY_CHARS
+    )
+    if include_summary:
+        # Local import keeps basic history initialization independent of summaries.
+        from summary_store import _read_summary, normalized_statement, summary_context
+
+        summary = summary_context(_read_summary(connection, player_id, npc_id), history)
+        represented = [normalized_statement(m["content"]) for m in history if m["role"] == "user"]
+        if summary:
+            represented.extend(normalized_statement(e["statement"]) for e in summary["entries"])
+        memories = [m for m in memories if normalized_statement(m["content"]) not in represented]
+    return history, memories, summary
+
+
+def inspect_chat_context(player_id, npc_id, query, db_path, *, include_summary):
+    """Read-only developer preview; all data belongs to one SQLite snapshot."""
+    from summary_store import _read_summary, review_summary_retention
+
+    with closing(sqlite3.connect(db_path)) as connection, connection:
+        connection.execute("BEGIN")
+        _history, memories, summary = _chat_context_snapshot(
+            connection, player_id, npc_id, query, include_summary
         )
-        memories = _get_relevant_memories(
-            connection, player_id, npc_id, query,
-            MAX_HISTORICAL_MESSAGES, MAX_MEMORY_CHARS,
-        )
-    return history, memories
+        rows = connection.execute(
+            "SELECT id, role, content FROM messages WHERE player_id=? AND npc_id=? ORDER BY id DESC LIMIT ?",
+            (player_id, npc_id, RECENT_MESSAGE_LIMIT),
+        ).fetchall()
+        saved = _read_summary(connection, player_id, npc_id)
+    return {
+        "player_id": player_id, "npc_id": npc_id, "query": query,
+        "recent_messages": [dict(zip(("message_id", "role", "content"), row)) for row in reversed(rows)],
+        "keyword_memories": memories, "summary_context": summary,
+        "saved_summary": saved, "summary_context_enabled": include_summary,
+        "summary_retention_review": review_summary_retention(saved),
+        "context_kind": "preview_for_next_request",
+    }
 
 
 def _memory_excerpt(content: str, keywords: set[str], budget: int) -> str:

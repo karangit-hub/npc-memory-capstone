@@ -24,12 +24,35 @@ ENV/
 .coverage
 htmlcov/
 
+# Runtime output, disposable test artifacts and local editor configuration
+*.log
+*.log.*
+*.pid
+logs/
+test-results/
+local-reports/
+.tmp/
+tmp/
+test-tmp/
+demo-data/
+npc-memory-browser-demo/
+.vscode/
+.idea/
+*.local
+*.local.*
+
 # Local environment variants and common private credential files
 .env.*
 *.pem
 *.key
 credentials.json
 secrets.json
+secrets/
+.secrets/
+*.pfx
+*.p12
+id_rsa*
+id_ed25519*
 
 # Temporary files and editor backups
 *.tmp

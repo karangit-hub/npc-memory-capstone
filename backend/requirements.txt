@@ -1,0 +1,6 @@
+# Direct runtime and test dependencies, pinned to the validated Python 3.12 environment.
+fastapi==0.143.3
+uvicorn==0.54.0
+ollama==0.6.3
+pydantic==2.14.1
+httpx==0.28.1

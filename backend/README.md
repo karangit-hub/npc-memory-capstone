@@ -1,10 +1,22 @@
-# Persistent NPC chat history and basic long-term retrieval
+# Persistent NPC history, historical retrieval, and extractive memory summaries
+
+For a fresh checkout, start with the [project setup guide](../README.md), which
+covers Python 3.12, virtual-environment installation from `requirements.txt`,
+Ollama installation, and explicitly downloading `qwen3:8b` when absent.
+The absolute Windows paths below describe the original local demonstration;
+substitute your checkout/demo paths or use the portable root-guide commands.
+
+For personal browser testing, see [Local browser demo](#local-browser-demo).
+The launcher uses a separate disposable DB and binds only to `127.0.0.1`.
 
 The existing FastAPI backend still uses local Ollama with `qwen3:8b`.
 The existing SQLite conversation history now includes Phase 1 long-term
 retrieval: a deterministic keyword baseline over older player statements.
-It uses Python's standard library, adds no dependencies or schema changes,
-and does not implement the full MemoryRepository research architecture.
+Phase 2 adds developer-controlled persistent **extractive** summaries: Qwen3
+selects important older user messages, and the application stores their complete
+original text with provenance. This adds two SQLite tables only when explicitly
+requested on a disposable database. No new packages are required; this is not
+the full MemoryRepository research architecture.
 
 On application startup, `memory_store.py` creates `conversation_memory.sqlite3`
 beside `main.py` if needed. Restarting the backend preserves existing history.
@@ -19,10 +31,12 @@ For each `/chat` request, the backend:
 2. Searches older **user** messages for that same exact player/NPC pair using
    keywords from the current question, excluding the latest 10 messages of
    either role. Both reads use the same database snapshot, even if another
-   connection writes meanwhile. Assistant replies are never historical-memory
-   candidates. The transaction and connection close before calling Ollama.
+   connection writes meanwhile. When enabled, saved summary context is read in
+   this same snapshot. Assistant replies are never historical-memory candidates.
+   The transaction and connection close before calling Ollama.
 3. Sends the system prompt, recent history, an optional historical user
-   statements block, and the current message to Ollama, in that order.
+   statements block, an optional saved-summary block, and the current message
+   to Ollama, in that order. No summaries are generated during `/chat`.
 4. Saves the user's message and the NPC reply together in one transaction after
    Ollama succeeds, then returns the reply. A failed Ollama request saves neither
    message.
@@ -60,8 +74,9 @@ histories. IDs remain exact and case-sensitive.
   provenance. Retrieval reads existing rows without generating facts or writing
   memory records. Character caps include any contextual text in the excerpts.
 
-The API uses `get_chat_context()` to obtain both blocks in one explicit `BEGIN`
-read transaction. The existing standalone `get_recent_messages()` and
+The API uses `get_chat_context_with_summary()` to obtain all enabled blocks in
+one explicit `BEGIN` read transaction. The Phase 1 `get_chat_context()` interface
+still returns only recent and keyword history. Standalone `get_recent_messages()` and
 `get_relevant_memories()` helpers remain available, but separate calls to them
 do not share a snapshot. SQLite's existing journal configuration is unchanged:
 rollback-journal writers may briefly wait for a reader; WAL readers can coexist
@@ -120,10 +135,317 @@ prefer?" because the phrases share no meaningful tokens. The desired behavior
 on that miss is uncertainty, not an invented beverage or a claim that the fact
 was never provided. Semantic retrieval has not been implemented.
 
-There is no summarization, semantic/vector retrieval, forgetting, retention
-policy, or Unity integration in this phase. A sensible next step is evaluating
-older-fact recall and irrelevant-memory rates against a fixed set of questions,
-including conflicts and paraphrases, before expanding the memory architecture.
+Summary context can make a retained tea statement available for that paraphrase
+without depending on a shared keyword. It does not implement semantic/vector
+search. There is still no controlled forgetting, automatic expiry, or Unity
+integration.
+
+## Phase 2: explicit extractive summarization
+
+`summarizer.py` exposes `await summarize_pair(player_id, npc_id, db_path)` and a
+developer CLI. There is **no automatic summarization in startup or chat**.
+Both schema initialization and generation refuse the original
+`backend/conversation_memory.sqlite3` path. Use a disposable DB or copy, never
+migrate the original database during this phase. Ordinary chat remains compatible
+with the old schema and reads no summary when tables are absent.
+
+Two additive tables preserve the existing `messages` table unchanged:
+
+| Table | Data |
+|---|---|
+| `memory_summary_state` | Exact player/NPC primary key, version, covered-through user message ID, UTC creation/update timestamps, model, format version |
+| `memory_summary_entries` | Pair and source-message primary key, complete original statement, category, source SHA-256, added version, UTC creation timestamp |
+
+Each call snapshots up to **20 older user messages**, after the pair's coverage
+watermark and outside the most recent 10 messages of either role. Source text
+is bounded to **12,000 characters per batch**. It then closes the read
+transaction before calling local `qwen3:8b` with an Ollama JSON schema.
+
+The response must classify every source ID exactly once into identity,
+relationship, preference, location, event, correction, other, or ignore.
+Pydantic validates types and forbids extra fields. Missing, duplicated, foreign,
+assistant, or fabricated IDs invalidate the whole response. The model cannot
+supply replacement fact text: stored statements are complete original user
+messages, not generated paraphrases. This preserves negation and corrections
+within each message and prevents unsupported generated names or claims from
+entering storage. It does not establish that the user's assertion is true.
+
+Model categories are proposals, not permission to retain a statement. The
+application-side rules below independently decide whether the source contains
+an explicit personal assertion. A model label such as `location` cannot turn
+a general question into the player's biography. Clear recognized assertions
+are prioritized even when the model incorrectly labels their conversational
+wording `ignore`. The CLI's `selection_review` reports the model proposal,
+effective category, retention result, reason, and policy version for each source.
+
+Publication opens a short `BEGIN IMMEDIATE` transaction, checks the expected
+summary version and exact source text again, appends selected entries, and
+atomically advances the watermark. Previously retained claims are not replaced;
+conflicting statements and explicit corrections remain separately sourced.
+Entries are labelled `unverified_user_statement` in model context. Conflict
+handling is conservative: the chat model must describe disagreement or
+uncertainty instead of silently choosing a newer value. Semantic conflict
+detection and resolution are not implemented; selection can still miss facts.
+
+A repeated call with no new eligible sources returns `status: noop` without a
+model call or version change. A long history requires repeated explicit calls
+until `noop`; each successful call processes one batch, including ignored
+messages. Concurrent stale jobs fail their version check rather than overwriting
+another job. On model, parsing, validation, source-change, or capacity failure,
+the previous summary and watermark remain intact and messages are unchanged.
+
+Limits: **16 retained source messages**, **600 characters per complete statement**,
+and **4,000 characters for the entire serialized summary context**, including
+JSON metadata/escaping. Selected overlong messages or a full summary cause an
+explicit failure; facts are never silently truncated or evicted. An input source
+over 12,000 characters can block progress and requires developer review. This
+version is selection-based compression, not arbitrary abstractive summarization.
+
+Summary context is **off by default**. Set `NPC_SUMMARY_CONTEXT=1` before starting
+the server to enable it; unset it or use `0` to disable. `NPC_DATABASE_PATH`
+optionally points the server at a disposable DB; its default remains unchanged.
+All enabled context blocks share one read snapshot. Identical recent user
+statements take priority, then summaries, then keyword excerpts. Exact normalized
+duplicates (case and whitespace only; meaningful punctuation is preserved) are
+removed from context without deleting source records; repeated
+summary statements merge their source IDs. Different/negated statements are
+preserved. Summaries are not filtered by query keywords, so paraphrases can use
+retained facts. The saved-summary block is quoted **user data**, never system
+instructions, and is subject to the existing uncertainty and injection guidance.
+
+### Safe developer workflow (PowerShell, from backend)
+
+Create a separate disposable copy while the source DB is idle. The copy must
+contain messages outside the recent window, or summarization correctly returns
+`noop`. For active databases, use SQLite's backup API instead of a raw file copy.
+
+```powershell
+$summaryDb = Join-Path ([IO.Path]::GetTempPath()) ("npc-summary-" + [guid]::NewGuid().ToString() + ".sqlite3")
+Copy-Item -LiteralPath .\conversation_memory.sqlite3 -Destination $summaryDb
+.\.venv\Scripts\python.exe -B .\summarizer.py --db $summaryDb --player-id karan --npc-id Arthur
+```
+
+Repeat the explicit summarizer command as needed until `noop`. To use that
+copy's summaries in a separate backend instance:
+
+```powershell
+$env:NPC_DATABASE_PATH = $summaryDb
+$env:NPC_SUMMARY_CONTEXT = "1"
+.\.venv\Scripts\python.exe -B -m uvicorn main:app --port 8001
+```
+
+These settings apply only to the process/shell. No API request or response fields
+change. Run the workflow only against a disposable copy for Phase 2 review;
+the implementation and tests do not migrate the original DB.
+
+## Local browser demo
+
+The buildless HTML/CSS/JavaScript interface is served at
+**http://127.0.0.1:8001/demo**. Existing `/`, `/health`, and `/chat` formats are
+unchanged. The demo includes chat bubbles, player selection (`karan`, `rajan`,
+or custom), an editable NPC ID, Enter/Send controls, a loading indicator, error
+messages, connection/model status, and clear view. Clear view changes only the
+page; it does not call a delete endpoint or clear SQLite history. Selecting a
+pair loads its actual latest 10 saved messages. IDs remain case-sensitive.
+
+The memory inspector is read-only. Its `POST /demo/api/context` endpoint reports
+recent messages with original IDs, keyword excerpts, saved summary metadata and
+entries, and effective summary context. It is a preview for the **next** request
+using the current draft, not a trace claiming what an earlier model call used.
+`GET /demo/api/status` checks the backend configuration and local Ollama model
+list. Empty arrays and null summaries are actual backend results, not simulated
+retrieval statuses. Refresh the preview after running the summarizer CLI.
+
+All `/demo` routes require `NPC_DEMO_ENABLED=1`, a loopback client/Host, same-origin
+requests, and a database path different from the original. Startup refuses demo
+mode with the original path before database initialization. No reset, delete, or
+summary-generation API is exposed. This is a local development interface, not
+authentication suitable for deployment. Keep the server bound to localhost.
+
+### Windows PowerShell commands
+
+Open the checkout in VS Code:
+
+```powershell
+code "C:\Users\Owner\Capstone-Workspace\npc-memory-capstone"
+```
+
+In one terminal, check Ollama. If it is already running, leave that service alone.
+If the check fails, run `ollama serve` in that terminal. No download is needed:
+
+```powershell
+try {
+    Invoke-RestMethod -Uri "http://127.0.0.1:11434/api/version" -TimeoutSec 3 -ErrorAction Stop
+} catch {
+    ollama serve
+}
+```
+
+In a second terminal, launch the demo:
+
+```powershell
+Set-Location "C:\Users\Owner\Capstone-Workspace\npc-memory-capstone\backend"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\run_demo.ps1
+```
+
+The launcher opts into demo routes and summary context, starts Uvicorn with
+`--host 127.0.0.1 --port 8001 --no-proxy-headers`, and restores its environment
+settings when it exits. It creates/reuses only this disposable database:
+
+```text
+C:\Users\Owner\Capstone-Workspace\npc-memory-browser-demo\demo.sqlite3
+```
+
+It never copies, resets, migrates, or deletes the original DB. Output goes to the
+terminal, not the four existing log files. To use another disposable path or
+port, pass `-DatabasePath "C:\path\to\disposable.sqlite3" -Port 8002`.
+
+In a third terminal, open Chrome:
+
+```powershell
+Start-Process -FilePath "C:\Program Files\Google\Chrome\Application\chrome.exe" -ArgumentList "http://127.0.0.1:8001/demo"
+```
+
+Select Karan and Arthur. Send your weapon, sister-name, and tea statements, then
+at least six additional unrelated exchanges after the last fact. Confirm in the
+inspector that the original messages have left the recent 10-message window.
+Generate summaries explicitly in the third terminal:
+
+```powershell
+Set-Location "C:\Users\Owner\Capstone-Workspace\npc-memory-capstone\backend"
+.\.venv\Scripts\python.exe -B .\summarizer.py --db "C:\Users\Owner\Capstone-Workspace\npc-memory-browser-demo\demo.sqlite3" --player-id karan --npc-id Arthur
+```
+
+Repeat that command until `status` is `noop`. Refresh the inspector and ask about
+those facts. Switch to Rajan to test isolation. To test persistence, press
+**Ctrl+C** in the backend terminal, run the same launcher command again, and
+reopen the same URL. The disposable DB and saved summaries survive the restart.
+Stop the backend with Ctrl+C when finished. Stop Ollama with Ctrl+C only if you
+started a separate `ollama serve` terminal for this test; do not stop an existing
+Ollama service. Closing Chrome does not stop the backend or delete history.
+
+### Phase 2 review fixes used by the demo
+
+Saved summary reads now revalidate source IDs, exact player/NPC scope, user role,
+SHA-256, and complete statement text. A changed or misattributed source produces
+a clear HTTP 503 before generation, rather than entering model context.
+
+`reply_safety.py` adds two bounded guards after the normal Ollama call and before
+the atomic exchange save. An exact first-person copy of actual user evidence is
+attributed as `You previously said: “...”`; it is not blindly rewritten into a
+different sentence. A narrow recognizer for complete `My ... is/are ...`
+statements quotes differing values for the same queried topic and requests
+clarification. Values come only from user evidence; there are no hardcoded test
+answers. Explicit correction markers are respected in source order. Assistant
+messages never become evidence for either guard.
+
+These guards do not perform semantic conflict detection. Complex statements,
+paraphrased first-person replies, nuanced corrections, and unsupported model
+explanations outside the recognized forms remain limitations. Summaries still
+require the CLI; there is no automatic summarization, forgetting, or vector
+retrieval. The existing Phase 2 capacity and classification limitations remain.
+
+### Initial live validation and review limits
+
+The November 2, 2026 local Qwen3 8B trials generated real summaries and exercised
+summary-backed silver-spear, Emily, and tea-paraphrase recall. Different-player
+isolation, unknown-fact uncertainty, and repeated generation without extra model
+calls were also checked. Conflicting weapon claims remained separately sourced.
+Earlier false abstentions and an irrelevant weather selection were preserved in
+the external trial reports rather than discarded.
+
+The final trial still answered the tea question in first person instead of
+addressing the player, and added a speculative interpretation to the conflicting
+weapon claims. These are open model-behavior issues for review. Complete quoted
+source text prevents the summary writer from inventing replacement fact text,
+but does not guarantee correct classification, complete selection, pronoun use,
+or faithful conflict handling in a generated reply. Finite capacity can block
+incremental updates; no compaction, silent eviction, or forgetting is performed.
+
+## Personal-fact retention and speaker attribution
+
+`retention_policy.py` is a conservative English grammar-based gate. It accepts
+recognized first-person/possessive assertions about identity, preferences,
+relationships, locations, and personal experiences, including negations,
+corrections, reverse phrases such as `Tea is my favorite drink`, and events such
+as `A healer saved my life`. It does not use particular test answers as rules.
+
+General questions and information requests are not personal facts. For example,
+`Is there a blacksmith in this village?` supplies no player-specific location.
+`Where do I live?` also supplies no answer. Merely containing `I` or `my` is
+insufficient: `I wonder if there is a blacksmith` and `My question is about the
+village` are information seeking, not biography. Confirmation questions,
+conditionals, and ambiguous retractions are treated conservatively.
+
+A question mark does **not** automatically disqualify a real personal assertion.
+Examples retained include `Did I mention that my sister's name is Emily?`,
+`Can you remember that I prefer tea?`, and `Can you recommend a shop, since I live
+near the river?`. Explicitly named relatives in requests, such as `Can you help
+my sister Emily?`, also carry personal information. In mixed messages, recognized
+factual clauses are kept distinct from unrelated questions or uncertainty.
+The complete original user message remains the stored, hashed source; this
+does not authorize model-generated replacements or guessed factual values.
+
+For personal-overview requests such as `What do you remember about me?`, the
+backend still makes the normal Ollama call, then constructs a bounded reply
+from eligible source clauses with explicit `you've told me` attribution. It
+quotes at most five distinct clauses (1,200 source characters), preserves
+negation, and does not pretend the result is an exhaustive biography. If no
+personal evidence is available, it returns the existing uncertainty reply.
+User questions cannot become `I asked` experiences of the NPC. Other dialogue
+requests still use the model; the system prompt explicitly distinguishes
+player speech, NPC speech, personal assertions, and general conversation topics.
+Conversation history and keyword retrieval remain available for questions such
+as `What did I ask about the blacksmith?` with correct player attribution.
+
+These rules are not a semantic parser or a truth verifier. Unrecognized wording,
+other languages, subtle presuppositions, sarcasm, and complex retractions may
+need manual review. Original messages are never removed. Ignored sources still
+advance the successful processing watermark, and are not automatically replayed.
+The finite Phase 2 capacity and model-generation limitations remain unchanged.
+Live Qwen3 testing still produced an uncertainty reply for a specific location
+question despite a supporting embedded assertion in summary context. The
+source-based overview guard does not repair every specific-fact answer.
+
+### Existing invalid entries: audit first, repair only after approval
+
+On read, saved entries still undergo source/role/hash validation. Eligibility
+is evaluated separately when building **personal summary context**. An old
+ineligible entry remains physically stored, with its original source and
+metadata, but is excluded from that context. The browser inspector shows both
+the raw saved entries and a **Retention review** containing
+`eligible_for_personal_context` and the reason. This filtering does not delete,
+reclassify, migrate, or rewrite persisted rows. Restart the backend to load the
+new code; ordinary chat still does not generate summaries.
+
+The new audit CLI is strictly read-only and has no `apply`, repair, or delete
+mode. It uses SQLite `mode=ro` plus `query_only` and does not create missing DBs:
+
+```powershell
+Set-Location "C:\Users\Owner\Capstone-Workspace\npc-memory-capstone\backend"
+.\.venv\Scripts\python.exe -B .\summary_audit.py --db "C:\Users\Owner\Capstone-Workspace\npc-memory-browser-demo\demo.sqlite3" --player-id karan --npc-id Arthur
+```
+
+The observed blacksmith row is source **17**, pair `karan` / `Arthur`, summary
+version **1**, coverage watermark **17**. Its original conversation message and
+stored summary row have not been changed. Re-running ordinary summarization
+will not repair this already-covered row.
+
+Proposed physical repair, **not performed or exposed as an API**:
+
+1. Stop demo writes and create a timestamped SQLite backup plus a JSON export
+   of the target row and summary metadata.
+2. Review that backup/export and obtain approval for this exact row.
+3. In one short transaction, verify the expected pair, source ID, source hash,
+   stored question text/category, and current summary version. Remove only the
+   erroneous derived summary entry, increment that pair's version, and update
+   its update timestamp. Preserve the coverage watermark, all `messages` rows,
+   every other summary entry, and every other player's data. Abort on mismatch.
+4. Audit again and compare all unaffected rows. Retain the backup for rollback.
+
+This would be correction of a misclassified derived entry, not a forgetting
+policy. No physical repair has been run. Old ineligible entries continue to
+count toward stored-entry capacity until an approved repair is performed.
 
 The endpoints and JSON formats remain unchanged:
 
@@ -167,6 +489,12 @@ test enables WAL only on its temporary database; production configuration is
 unchanged. Tests also verify that read transactions close before generation and
 release their locks after failures. All test databases are disposable;
 tests never initialize, clear, or write the real conversation database.
+Phase 2 tests additionally cover additive schema initialization, protected-path
+refusal, source tracking, fresh-process persistence, exact pair isolation,
+incremental watermarks and stale-job rejection, empty/long histories, conflicting
+claims and corrections, fabricated/invalid model output, capacity rollback,
+generation failure, snapshot consistency during concurrent publication, duplicate
+suppression, opt-in settings, and preserving existing API behavior.
 
 The storage tests can also run with a standard Python installation alone:
 
