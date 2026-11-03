@@ -215,6 +215,3 @@ The local Unity-to-FastAPI chat round trip has been completed successfully: a me
 
 Keep Unity source such as `Assets`, `Packages`, and `ProjectSettings` in GitHub; exclude generated `Library`, `Temp`, `Obj`, and build output folders. Preserve Unity `.meta` files so asset references remain stable.
 
-### Suggested status paragraph for Architecture and implementation status
-
-> A Unity village client and scene builder have been added and run successfully. The Unity client has successfully communicated with the documented FastAPI `/chat` endpoint and displayed an NPC response. Dialogue memory remains in the existing backend, scoped by player ID and NPC ID. Aftab's separate evaluation work remains outstanding. Controlled forgetting and semantic/vector retrieval are not implemented.
