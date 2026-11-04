@@ -146,35 +146,35 @@ The scene also includes a third-person player controller, orbit camera, dialogue
 
 NPCs wander locally and pause between walks. The NPC being spoken to stops while the dialogue panel is open, including while it waits for the backend response, then resumes when the panel closes. The supplied figures are 3D humanoid blockout meshes built from Unity primitives; they do not include rigged human models or animation clips.
 
-### Start from GitHub and create/open the Unity project
+### Start from GitHub and open the Unity project
 
-The Unity `Assets` files are now included in this repository. They are source assets, not a standalone Unity project. Follow the path that matches the files committed to the repository:
+The repository includes a complete Unity project at `unity/NPCMemoryVillage` and a matching `unity/NPCMemoryVillage-UnityProject.zip` archive. It was created with **Unity 6000.3.27f2**. Install that editor version when possible, extract the archive if needed, then in Unity Hub choose **Add/Open project** and select the `NPCMemoryVillage` folder. Do not select the `Assets` folder itself.
 
-- **If the Unity folder contains `Assets`, `Packages`, and `ProjectSettings`:** clone/download the repository, open Unity Hub, choose **Add/Open project**, and select that Unity project folder.
-- **If the repository contains only the Unity `Assets` folder:** install Unity Hub and a compatible Unity Editor, then in Unity Hub choose **New project → 3D (URP)**. Give it a project name such as `NPCMemoryVillage`. Copy the repository's Unity `Assets` folder into the new project's root and merge it with the template `Assets` folder. Do not open the `Assets` folder itself as a Unity project. See Unity's [create-a-project guide](https://docs.unity3d.com/Manual/create-first-project.html) and [URP setup guide](https://docs.unity3d.com/Packages/com.unity.render-pipelines.universal@17.0/manual/creating-a-new-project-with-urp.html).
+The project already includes `Assets`, `Packages`, `ProjectSettings`, the generated `Assets/Scenes/Village.unity` scene, and a configured `Assets/Config/BackendConfig.asset`. No Unity project creation, Assets-folder merge, or manual BackendConfig assignment is required for the supplied project. See Unity's [create-a-project guide](https://docs.unity3d.com/Manual/create-first-project.html) if you are importing the Assets package into a different project.
 
 Wait for Unity to import and compile. The controller scripts use the legacy Input Manager API. In **Edit → Project Settings → Player → Active Input Handling**, select **Both** or **Input Manager (Old)**, then restart Unity if it requests it. See Unity's [input handling guide](https://docs.unity3d.com/Manual/UIE-Runtime-Event-System.html).
 
-If `Assets/Scenes/Village.unity` is already in the repository, open it. If it is absent, choose **NPC Memory → Build Demo Village** from Unity's menu; the builder creates and saves `Assets/Scenes/Village.unity` and the materials. Save the scene after generation.
+Open `Assets/Scenes/Village.unity` and press **Play**. If you are importing only the Assets package into a newly created **3D (URP)** project, preserve all `.meta` files, then choose **NPC Memory → Build Demo Village** only when you need to regenerate the scene and materials.
 
 ### Connect the scene to FastAPI
 
-1. In the Unity Project window, choose **Assets → Create → NPC Memory → Backend Config** and name the asset `BackendConfig`.
-2. Set its URL, route, field names, and player ID. For the isolated browser demo, use the values below. The documented API request is `POST /chat` with `{"player_id":"karan","npc_id":"Arthur","message":"Hello"}`; the API returns `{"npc_id":"Arthur","reply":"..."}`.
+The supplied scene already assigns `Assets/Config/BackendConfig.asset` to **NPC Backend Client**. Its defaults target the isolated browser-demo API on port 8001:
 
-   | `BackendConfig` field | Value |
-   | --- | --- |
-   | `baseUrl` | `http://127.0.0.1:8001` |
-   | `chatPath` | `/chat` |
-   | `playerIdField` | `player_id` |
-   | `npcIdField` | `npc_id` |
-   | `messageField` | `message` |
-   | `replyField` | `reply` |
-   | `playerId` | `karan` for the prior Karan/Arthur test |
+The documented API request is `POST /chat` with `{"player_id":"karan","npc_id":"Arthur","message":"Hello"}`; the API returns `{"npc_id":"Arthur","reply":"..."}`.
 
-   These settings must match the request schema in FastAPI `/docs`. The Unity client has a reply-field fallback, but setting `replyField` to `reply` matches the documented response directly.
-3. In the Unity Hierarchy, select **NPC Backend Client** and drag `BackendConfig` into its **Config** field. The startup player-ID screen needs this asset assigned, even when you only want to explore. The FastAPI server can stay stopped until you want backend replies.
-4. At Play, the startup screen is prefilled with the last player ID used on this computer or the `BackendConfig` value. Click the field, enter the desired ID, and choose **Enter Village**. The chosen ID is sent with every chat request and saved locally for the next run.
+| `BackendConfig` field | Value |
+| --- | --- |
+| `baseUrl` | `http://127.0.0.1:8001` |
+| `chatPath` | `/chat` |
+| `playerIdField` | `player_id` |
+| `npcIdField` | `npc_id` |
+| `messageField` | `message` |
+| `replyField` | `reply` |
+| `playerId` | `karan` for the prior Karan/Arthur test |
+
+These settings must match the request schema in FastAPI `/docs`. The Unity client has a reply-field fallback, but setting `replyField` to `reply` matches the documented response directly.
+
+At Play, the startup screen is prefilled with the last player ID used on this computer or the `BackendConfig` value. Click the field, enter the desired ID, and choose **Enter Village**. The chosen ID is sent with every chat request and saved locally for the next run. The FastAPI server can stay stopped until you want backend replies.
 
 ### Start Ollama and FastAPI
 
@@ -186,7 +186,7 @@ If `Assets/Scenes/Village.unity` is already in the repository, open it. If it is
    ```
 
    This starts the isolated demo API at port 8001 and uses `npc-memory-browser-demo/demo.sqlite3`. Confirm it is available at `http://127.0.0.1:8001/docs`.
-3. On macOS, the repository's direct Uvicorn option can be used from `backend` if the Windows-only demo launcher is unavailable:
+3. On macOS or Linux, the repository's direct Uvicorn option can be used from `backend` if the Windows-only demo launcher is unavailable:
 
    ```bash
    python3.12 -m venv .venv
@@ -203,5 +203,3 @@ If `Assets/Scenes/Village.unity` is already in the repository, open it. If it is
 To reuse Karan's earlier test, connect Unity to the same backend database and enter the exact case-sensitive player ID `karan`; talk to Arthur, whose `npc_id` is `Arthur`. Unity sends both IDs with every request. The backend scopes the conversation by the player/NPC pair. A different player ID selects a separate memory scope. Mira, Tomas, and Lena use separate NPC IDs and therefore separate histories; facts told to Arthur are not automatically shared with them. IDs are memory keys, not authentication, and Unity does not infer them from a real-world name or sign-in.
 
 The local Unity-to-FastAPI chat round trip has been completed successfully: a message sent in Unity received and displayed an NPC response from FastAPI. The backend's persistence and player-isolation tests are documented above. To verify a particular memory in Unity, use the same backend database, player ID, and NPC ID that contain that memory, then ask the NPC about it after reopening the conversation.
-
-
