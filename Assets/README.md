@@ -69,18 +69,3 @@ When Play starts, enter the player ID on the Unity screen. Use the exact same ca
 
 Each NPC wanders locally and pauses while their dialogue panel is open. WASD moves the player; point at a nearby NPC and press **E** or left-click to talk; **E** also selects the nearest NPC in range; hold the right mouse button and drag to orbit the camera; Escape closes the dialogue. The figures are blockout meshes made from Unity primitives, not rigged human models.
 
-## Test coverage and boundaries
-
-The live Unity client has been used to send a chat message to FastAPI and display the returned reply. Unity can exercise the backend's normal chat path, continued messages, and memory separation by player/NPC ID. It can consume saved summaries when the backend is configured to use them, but summary generation is an explicit backend CLI operation and is not triggered by Unity.
-
-The backend's automated tests separately cover malformed requests, model-error handling, database persistence and isolation, retrieval and summary edge cases, reply-safety rules, and browser-demo routes. Those backend-only test fixtures and internal scenarios are not all actions exposed by the Unity interface. The backend currently uses a friendly-guard system prompt for every NPC ID; IDs still isolate memory, but distinct NPC role/persona fields are not sent to FastAPI yet.
-
-## Troubleshooting
-
-- **Connection refused or timeout:** start FastAPI and Ollama; check Base URL and port in `BackendConfig.asset`.
-- **HTTP 404:** check the host, port, and `/chat` route.
-- **HTTP 422:** confirm the three request field names match FastAPI's `/docs`.
-- **No old memory:** verify the exact player ID and NPC ID and connect to the same database used earlier. `Arthur` and `Blacksmith` are separate histories.
-- **No movement/input:** set Active Input Handling to Both or Input Manager (Old).
-- **Pink materials or missing URP components:** open the Assets folder in a 3D URP project with the Universal Render Pipeline package installed.
-- **Backend unavailable in chat:** the player screen can still open the village if the config asset is assigned, but generated dialogue requires FastAPI and Ollama.
